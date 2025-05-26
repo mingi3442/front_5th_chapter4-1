@@ -102,4 +102,4 @@ jobs:
           echo "🎉 Blue-Green deployment completed!"
           echo "Target: ${{ steps.target.outputs.target_color }}"
           echo "Bucket: ${{ steps.target.outputs.target_bucket }}"
-          echo "🌐 Live URL: https://prod.min73.dev"
+          echo "🌐 Live URL: https://prod.min71.dev"
