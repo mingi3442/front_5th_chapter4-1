@@ -1,9 +1,9 @@
-# .github/workflows/blue-green-deployment.yml (브랜치 분기 제거)
-name: Blue-Green Deployment
+# .github/workflows/blue-green-deployment.yml (완전 자립형)
+name: Blue-Green Deployment (Self-Contained)
 
 on:
   push:
-    branches: [main] # main만 대상
+    branches: [main]
   workflow_dispatch:
 
 jobs:
@@ -12,7 +12,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v1
 
       - name: Install dependencies
         run: npm ci
@@ -20,12 +20,22 @@ jobs:
       - name: Build Next.js project
         run: npm run build
 
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_REGION }}
+      - name: Setup AWS CLI and credentials
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ secrets.AWS_REGION }}
+        run: |
+          # AWS CLI는 GitHub 러너에 기본 설치되어 있음
+          aws configure set aws_access_key_id "$AWS_ACCESS_KEY_ID"
+          aws configure set aws_secret_access_key "$AWS_SECRET_ACCESS_KEY" 
+          aws configure set default.region "$AWS_DEFAULT_REGION"
+
+          # 연결 테스트
+          aws sts get-caller-identity
+
+      - name: Install jq for JSON parsing
+        run: sudo apt-get update && sudo apt-get install -y jq
 
       - name: Determine target environment (Blue/Green)
         id: target
