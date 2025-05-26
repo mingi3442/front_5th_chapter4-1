@@ -1,48 +1,25 @@
-# .github/workflows/blue-green-deployment.yml
-name: Blue-Green Deployment to AWS
+# .github/workflows/blue-green-deployment.yml (브랜치 분기 제거)
+name: Blue-Green Deployment
 
-# 배포 트리거: main 브랜치(prod) 또는 develop 브랜치(dev)에 push 시 실행
 on:
   push:
-    branches:
-      - main # 프로덕션 환경 배포 (prod.min73.dev)
-      - develop # 개발 환경 배포 (dev.min71.dev)
-  workflow_dispatch: # 수동 실행 가능
+    branches: [main] # main만 대상
+  workflow_dispatch:
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
 
     steps:
-      # 1. 소스코드 체크아웃
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 2. npm 의존성 설치 (package-lock.json 기반으로 정확한 버전 설치)
       - name: Install dependencies
         run: npm ci
 
-      # 3. Next.js 프로젝트 빌드 (정적 파일 생성)
       - name: Build Next.js project
         run: npm run build
 
-      # 4. 브랜치에 따라 환경 변수 설정 (main=prod, develop=dev)
-      - name: Set environment variables based on branch
-        id: env
-        run: |
-          if [[ ${{ github.ref }} == 'refs/heads/main' ]]; then
-            # main 브랜치면 프로덕션 환경 (prod.min73.dev)
-            echo "environment=prod" >> $GITHUB_OUTPUT
-            echo "distribution_id=${{ secrets.PRODUCTION_DISTRIBUTION_ID }}" >> $GITHUB_OUTPUT
-            echo "domain=prod.min71.dev" >> $GITHUB_OUTPUT
-          else
-            # develop 브랜치면 개발 환경 (dev.min71.dev)
-            echo "environment=dev" >> $GITHUB_OUTPUT
-            echo "distribution_id=${{ secrets.DEV_DISTRIBUTION_ID }}" >> $GITHUB_OUTPUT
-            echo "domain=dev.min71.dev" >> $GITHUB_OUTPUT
-          fi
-
-      # 5. AWS 자격증명 설정 (S3, CloudFront 접근을 위해 필요)
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -50,99 +27,69 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      # 6. 현재 활성화된 환경 확인 후 반대 환경으로 배포 타겟 설정
-      - name: Determine target environment for Blue-Green deployment
+      - name: Determine target environment (Blue/Green)
         id: target
         run: |
-          # CloudFront에서 현재 Origin 도메인 확인
-          CURRENT_ORIGIN=$(aws cloudfront get-distribution --id ${{ steps.env.outputs.distribution_id }} --query 'Distribution.DistributionConfig.Origins.Items[0].DomainName' --output text)
-          echo "Current active origin: $CURRENT_ORIGIN"
+          # prod 환경의 현재 Origin 확인
+          CURRENT_ORIGIN=$(aws cloudfront get-distribution --id ${{ secrets.PRODUCTION_DISTRIBUTION_ID }} --query 'Distribution.DistributionConfig.Origins.Items[0].DomainName' --output text)
+          echo "Current origin: $CURRENT_ORIGIN"
 
-          # 현재가 blue면 green으로, green이면 blue로 타겟 설정
+          # blue/green 판단
           if [[ $CURRENT_ORIGIN == *"blue"* ]]; then
             TARGET="green"
-            echo "🔵 Current: BLUE → 🎯 Deploying to: GREEN"
+            echo "🔵 Current: BLUE → 🎯 Target: GREEN"
           else
             TARGET="blue"
-            echo "🟢 Current: GREEN → 🎯 Deploying to: BLUE"
+            echo "🟢 Current: GREEN → 🎯 Target: BLUE"
           fi
 
-          # 다음 스텝에서 사용할 변수들 설정
           echo "target_color=$TARGET" >> $GITHUB_OUTPUT
-          echo "target_bucket=hanghae-${{ steps.env.outputs.environment }}-$TARGET" >> $GITHUB_OUTPUT
+          echo "target_bucket=hanghae-prod-$TARGET" >> $GITHUB_OUTPUT
 
-      # 7. 빌드된 파일을 타겟 S3 버킷에 업로드
       - name: Deploy to target S3 bucket
         run: |
-          echo "📤 Deploying to S3 bucket: ${{ steps.target.outputs.target_bucket }}"
-          echo "🎯 Target domain: ${{ steps.env.outputs.domain }}"
-          # out/ 폴더의 모든 파일을 S3에 동기화 (기존 파일 삭제 후 새 파일 업로드)
+          echo "📤 Deploying to: ${{ steps.target.outputs.target_bucket }}"
           aws s3 sync out/ s3://${{ steps.target.outputs.target_bucket }} --delete
 
-      # 8. 배포된 환경이 정상 작동하는지 헬스체크
-      - name: Health check on deployed environment
+      - name: Health check
         run: |
-          # S3 정적 웹사이트 엔드포인트로 헬스체크
           HEALTH_URL="https://${{ steps.target.outputs.target_bucket }}.s3.amazonaws.com/index.html"
           echo "🏥 Health checking: $HEALTH_URL"
 
-          # HTTP 요청이 성공하면 배포 성공으로 판단
           if curl -f --max-time 30 "$HEALTH_URL"; then
-            echo "✅ Health check passed - deployment is healthy"
+            echo "✅ Health check passed"
           else
-            echo "❌ Health check failed - rolling back deployment"
-            exit 1  # 실패 시 워크플로우 중단
+            echo "❌ Health check failed"
+            exit 1
           fi
 
-      # 9. CloudFront Origin을 새로 배포된 환경으로 스위칭
-      - name: Switch CloudFront origin to new environment
+      - name: Switch CloudFront origin
         run: |
-          echo "🔄 Switching CloudFront origin to ${{ steps.target.outputs.target_color }} environment"
-          echo "🌐 This will update: https://${{ steps.env.outputs.domain }}"
+          echo "🔄 Switching to ${{ steps.target.outputs.target_color }}"
 
-          # 현재 CloudFront 배포 설정 JSON 파일로 저장
-          aws cloudfront get-distribution --id ${{ steps.env.outputs.distribution_id }} > distribution.json
+          # 현재 설정 가져오기
+          aws cloudfront get-distribution --id ${{ secrets.PRODUCTION_DISTRIBUTION_ID }} > dist.json
+          ETAG=$(jq -r '.ETag' dist.json)
 
-          # ETag 추출 (CloudFront 업데이트 시 필수)
-          ETAG=$(jq -r '.ETag' distribution.json)
-          echo "📋 Current ETag: $ETAG"
-
-          # Origin 도메인을 새 타겟 버킷으로 변경
+          # Origin 변경
           NEW_DOMAIN="${{ steps.target.outputs.target_bucket }}.s3.amazonaws.com"
-          echo "🎯 New origin domain: $NEW_DOMAIN"
+          jq --arg domain "$NEW_DOMAIN" '.Distribution.DistributionConfig.Origins.Items[0].DomainName = $domain' dist.json | jq '.Distribution.DistributionConfig' > new-config.json
 
-          # JSON 설정에서 Origin 도메인 업데이트 후 새 설정 파일 생성
-          jq --arg domain "$NEW_DOMAIN" \
-             '.Distribution.DistributionConfig.Origins.Items[0].DomainName = $domain' \
-             distribution.json | \
-             jq '.Distribution.DistributionConfig' > updated-config.json
-
-          # CloudFront 배포 설정 업데이트 (ETag로 동시성 제어)
+          # 업데이트
           aws cloudfront update-distribution \
-            --id ${{ steps.env.outputs.distribution_id }} \
-            --distribution-config file://updated-config.json \
+            --id ${{ secrets.PRODUCTION_DISTRIBUTION_ID }} \
+            --distribution-config file://new-config.json \
             --if-match $ETAG
 
-      # 10. CloudFront 캐시 무효화 (새 파일들이 즉시 반영되도록)
       - name: Invalidate CloudFront cache
         run: |
-          echo "🗑️ Invalidating CloudFront cache for immediate updates"
-          echo "🌐 Cache invalidation for: https://${{ steps.env.outputs.domain }}"
-          # 모든 경로(/*) 캐시 무효화
           aws cloudfront create-invalidation \
-            --distribution-id ${{ steps.env.outputs.distribution_id }} \
+            --distribution-id ${{ secrets.PRODUCTION_DISTRIBUTION_ID }} \
             --paths "/*"
 
-      # 11. 배포 완료 요약 정보 출력
-      - name: Display deployment summary
+      - name: Deployment summary
         run: |
-          echo "🎉 Blue-Green deployment completed successfully!"
-          echo "📊 Deployment Summary:"
-          echo "  - Environment: ${{ steps.env.outputs.environment }}"
-          echo "  - Target Color: ${{ steps.target.outputs.target_color }}"
-          echo "  - S3 Bucket: ${{ steps.target.outputs.target_bucket }}"
-          echo "  - CloudFront ID: ${{ steps.env.outputs.distribution_id }}"
-          echo "  - 🌐 Live URL: https://${{ steps.env.outputs.domain }}"
-          echo ""
-          echo "⏳ Note: CloudFront propagation may take 5-15 minutes"
-          echo "🔗 Direct S3 URL (for testing): https://${{ steps.target.outputs.target_bucket }}.s3.amazonaws.com"
+          echo "🎉 Blue-Green deployment completed!"
+          echo "Target: ${{ steps.target.outputs.target_color }}"
+          echo "Bucket: ${{ steps.target.outputs.target_bucket }}"
+          echo "🌐 Live URL: https://prod.min73.dev"
