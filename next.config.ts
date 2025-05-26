@@ -8,9 +8,7 @@ const bundleAnalyzer = withBundleAnalyzer({
 const nextConfig: NextConfig = {
   /* config options here */
   output: "export",
-  experimental: {
-    optimizeCss: true,
-  },
+
 };
 
 export default bundleAnalyzer(nextConfig);

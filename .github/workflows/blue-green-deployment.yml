@@ -34,7 +34,7 @@ jobs:
             # main 브랜치면 프로덕션 환경 (prod.min73.dev)
             echo "environment=prod" >> $GITHUB_OUTPUT
             echo "distribution_id=${{ secrets.PRODUCTION_DISTRIBUTION_ID }}" >> $GITHUB_OUTPUT
-            echo "domain=prod.min73.dev" >> $GITHUB_OUTPUT
+            echo "domain=prod.min71.dev" >> $GITHUB_OUTPUT
           else
             # develop 브랜치면 개발 환경 (dev.min71.dev)
             echo "environment=dev" >> $GITHUB_OUTPUT
