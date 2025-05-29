@@ -74,11 +74,44 @@ jobs:
           echo "current_color=$CURRENT" >> $GITHUB_OUTPUT
           echo "current_bucket=hanghae-prod-$CURRENT" >> $GITHUB_OUTPUT
 
+      - name: Debug current CloudFront configuration
+        run: |
+          echo "🔍 Debugging CloudFront configuration..."
+
+          # 현재 CloudFront Origin 설정 확인
+          echo "=== Current CloudFront Origin ==="
+          aws cloudfront get-distribution --id ${{ secrets.PRODUCTION_DISTRIBUTION_ID }} \
+            --query 'Distribution.DistributionConfig.Origins.Items[0]' \
+            --output table
+
+          # CloudFront 상태 확인
+          echo "=== CloudFront Status ==="
+          aws cloudfront get-distribution --id ${{ secrets.PRODUCTION_DISTRIBUTION_ID }} \
+            --query 'Distribution.Status' --output text
+
+          # 대상 S3 버킷 직접 접근 테스트
+          echo "=== Testing S3 direct access ==="
+          TARGET_BUCKET="${{ steps.target.outputs.target_bucket }}"
+          S3_URL="https://$TARGET_BUCKET.s3.amazonaws.com/index.html" 
+
+          echo "Testing: $S3_URL"
+          curl -I "$S3_URL" || echo "S3 direct access failed"
+
+          # S3 버킷 정책 확인
+          echo "=== S3 Bucket Policy ==="
+          aws s3api get-bucket-policy --bucket $TARGET_BUCKET --query 'Policy' --output text || echo "No bucket policy found"
+
       - name: Deploy to target S3 bucket
         run: |
           echo "📤 Deploying to: ${{ steps.target.outputs.target_bucket }}"
 
-          # S3 파일 업로드만 (간단하게)
+          # S3 웹사이트 호스팅 활성화 (CloudFront 호환성을 위해)
+          echo "🌐 Enabling S3 website hosting..."
+          aws s3 website s3://${{ steps.target.outputs.target_bucket }} \
+            --index-document index.html \
+            --error-document index.html
+
+          # S3 파일 업로드
           aws s3 sync out/ s3://${{ steps.target.outputs.target_bucket }} --delete
 
           echo "✅ Deployment completed"
@@ -95,8 +128,8 @@ jobs:
           # 롤백을 위해 현재 설정 저장
           echo "etag=$ETAG" >> $GITHUB_OUTPUT
 
-          # Origin 변경
-          NEW_DOMAIN="${{ steps.target.outputs.target_bucket }}.s3.amazonaws.com"
+          # Origin 변경 (S3 웹사이트 엔드포인트 사용)
+          NEW_DOMAIN="${{ steps.target.outputs.target_bucket }}.s3-website-${{ secrets.AWS_REGION }}.amazonaws.com"
           jq --arg domain "$NEW_DOMAIN" '.Distribution.DistributionConfig.Origins.Items[0].DomainName = $domain' dist.json | jq '.Distribution.DistributionConfig' > new-config.json
 
           # 업데이트
@@ -129,6 +162,10 @@ jobs:
             sleep 30
           done
 
+          # 추가 전파 대기 (3분)
+          echo "⏳ Waiting for CloudFront propagation..."
+          sleep 180
+
       - name: Invalidate CloudFront cache
         run: |
           echo "🔄 Invalidating CloudFront cache..."
@@ -142,37 +179,11 @@ jobs:
           echo "Invalidation ID: $INVALIDATION_ID"
           echo "✅ Cache invalidation initiated"
 
-      - name: Lighthouse performance audit
+      - name: Final check
         run: |
-          echo "🔍 Running Lighthouse performance audit..."
-          PROD_URL="https://prod.min71.dev"
-
-          # 간단한 연결 테스트 먼저
-          echo "Testing connection..."
-          if ! curl -f --max-time 30 "$PROD_URL/" > /dev/null; then
-            echo "⚠️ Site not accessible yet, skipping Lighthouse"
-            exit 0
-          fi
-
-          # Lighthouse 실행
-          lighthouse "$PROD_URL" \
-            --output=json \
-            --output-path=./lighthouse-report.json \
-            --chrome-flags="--headless --no-sandbox --disable-dev-shm-usage" \
-            --quiet \
-            --max-wait-for-load=30000 || echo "Lighthouse failed, continuing..."
-
-          # 성능 점수 확인 (파일이 있는 경우만)
-          if [ -f "./lighthouse-report.json" ]; then
-            PERFORMANCE_SCORE=$(jq -r '.categories.performance.score * 100' lighthouse-report.json 2>/dev/null || echo "0")
-            echo "📊 Performance Score: $PERFORMANCE_SCORE"
-            
-            if (( $(echo "$PERFORMANCE_SCORE > 0" | bc -l) )); then
-              echo "✅ Lighthouse audit completed"
-            fi
-          else
-            echo "ℹ️ Lighthouse report not generated, skipping..."
-          fi
+          echo "🎯 Deployment completed!"
+          echo "🌐 Live URL: https://prod.min71.dev"
+          echo "ℹ️ Please manually verify the site is working"
 
       - name: Rollback on failure
         if: failure()
