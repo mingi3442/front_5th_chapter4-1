@@ -130,6 +130,34 @@ jobs:
             --exact-timestamps \
             --exclude "*.map"
 
+          # CloudFront Origin Access Control을 위한 버킷 정책 설정
+          echo "🔒 Setting up bucket policy for CloudFront access..."
+          cat > bucket-policy.json << EOF
+          {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Sid": "AllowCloudFrontServicePrincipal",
+                "Effect": "Allow",
+                "Principal": {
+                  "Service": "cloudfront.amazonaws.com"
+                },
+                "Action": "s3:GetObject",
+                "Resource": "arn:aws:s3:::${{ steps.environment.outputs.target_bucket }}/*",
+                "Condition": {
+                  "StringEquals": {
+                    "AWS:SourceArn": "arn:aws:cloudfront::${{ secrets.AWS_ACCOUNT_ID }}:distribution/${{ secrets.PRODUCTION_DISTRIBUTION_ID }}"
+                  }
+                }
+              }
+            ]
+          }
+          EOF
+
+          aws s3api put-bucket-policy \
+            --bucket ${{ steps.environment.outputs.target_bucket }} \
+            --policy file://bucket-policy.json
+
           echo "✅ Deployment to staging completed"
 
       - name: Wait for S3 propagation
@@ -215,22 +243,26 @@ jobs:
           # CloudFront 배포 상태 모니터링
           DISTRIBUTION_ID="${{ secrets.PRODUCTION_DISTRIBUTION_ID }}"
 
-          for i in {1..30}; do
+          for i in {1..20}; do
             STATUS=$(aws cloudfront get-distribution --id $DISTRIBUTION_ID --query 'Distribution.Status' --output text)
-            echo "Deployment status ($i/30): $STATUS"
+            echo "Deployment status ($i/20): $STATUS"
             
             if [[ "$STATUS" == "Deployed" ]]; then
               echo "✅ CloudFront deployment completed"
               break
             fi
             
-            if [[ $i -eq 30 ]]; then
+            if [[ $i -eq 20 ]]; then
               echo "❌ CloudFront deployment timed out"
               exit 1
             fi
             
             sleep 30
           done
+
+          # 추가 대기 시간 (CloudFront 전파 완료)
+          echo "⏳ Waiting for CloudFront propagation..."
+          sleep 60
 
       - name: Production health check
         run: |
@@ -269,7 +301,30 @@ jobs:
             --output text)
 
           echo "Invalidation ID: $INVALIDATION_ID"
-          echo "✅ Cache invalidation initiated"
+
+          # 캐시 무효화 완료 대기
+          echo "⏳ Waiting for cache invalidation to complete..."
+          for i in {1..10}; do
+            STATUS=$(aws cloudfront get-invalidation \
+              --distribution-id ${{ secrets.PRODUCTION_DISTRIBUTION_ID }} \
+              --id $INVALIDATION_ID \
+              --query 'Invalidation.Status' \
+              --output text)
+            
+            echo "Invalidation status ($i/10): $STATUS"
+            
+            if [[ "$STATUS" == "Completed" ]]; then
+              echo "✅ Cache invalidation completed"
+              break
+            fi
+            
+            if [[ $i -eq 10 ]]; then
+              echo "⚠️ Cache invalidation still in progress, continuing..."
+              break
+            fi
+            
+            sleep 30
+          done
 
       - name: Post-deployment verification
         run: |
