@@ -132,8 +132,8 @@ jobs:
           CURRENT_ORIGIN_ID=$(jq -r '.Distribution.DistributionConfig.Origins.Items[0].Id' dist.json)
           echo "Current Origin ID: $CURRENT_ORIGIN_ID"
 
-          # Origin 변경 (S3 웹사이트 엔드포인트 사용)
-          NEW_DOMAIN="${{ steps.target.outputs.target_bucket }}.s3-website-${{ secrets.AWS_REGION }}.amazonaws.com"
+          # Origin 변경 (S3 웹사이트 엔드포인트 사용 - 올바른 형식)
+          NEW_DOMAIN="${{ steps.target.outputs.target_bucket }}.s3-website.${{ secrets.AWS_REGION }}.amazonaws.com"
           NEW_ORIGIN_ID="${{ steps.target.outputs.target_bucket }}"
           echo "New domain will be: $NEW_DOMAIN"
           echo "New Origin ID will be: $NEW_ORIGIN_ID"
