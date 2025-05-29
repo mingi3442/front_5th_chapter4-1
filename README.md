@@ -51,7 +51,7 @@ GitHub Actions 워크플로우는 다음과 같은 단계로 진행됩니다:
   - **CloudFront**: `https://d2bw6fzzfn3dq3.cloudfront.net`
 - **모니터링 대시보드**:
   - CloudWatch 콘솔: `AWS Console > CloudWatch > Dashboards`
-  - 알림 설정: `AWS Console > SNS > Topics`
+  - 알림 설정: `AWS Console > SNS > Email`
 
 ## 주요 개념
 
