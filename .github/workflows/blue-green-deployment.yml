@@ -28,16 +28,25 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Run tests
+      - name: Code quality checks
         run: |
-          echo "🧪 Running unit tests..."
-          npm test -- --coverage --watchAll=false
+          echo "🔍 Running code quality checks..."
 
-          echo "🔍 Running linting..."
-          npm run lint
+          # 린팅만 실행 (테스트 코드 없음)
+          if [ -f "package.json" ] && npm run | grep -q "lint"; then
+            echo "Running linting..."
+            npm run lint
+          else
+            echo "ℹ️ No lint script found, skipping..."
+          fi
 
-          echo "🏗️ Type checking..."
-          npm run type-check
+          # 타입 체크 (TypeScript 프로젝트인 경우)
+          if [ -f "tsconfig.json" ] && npm run | grep -q "type-check"; then
+            echo "Running type check..."
+            npm run type-check
+          else
+            echo "ℹ️ No type-check script found, skipping..."
+          fi
 
       - name: Build Next.js project
         run: |
@@ -488,7 +497,7 @@ jobs:
         if: always()
         run: |
           echo "📊 DEPLOYMENT SUMMARY"
-          echo "===================="`
+          echo "===================="
           echo "🎯 Target Environment: ${{ steps.environment.outputs.target_color }}"
           echo "📦 Target Bucket: ${{ steps.environment.outputs.target_bucket }}"
           echo "🌐 Production URL: https://prod.min71.dev"
@@ -503,8 +512,3 @@ jobs:
           else
             echo "❌ Deployment failed - rollback initiated"
           fi
-
-          # Slack 알림 (선택적)
-          # curl -X POST -H 'Content-type: application/json' \
-          #   --data "{\"text\":\"Deployment ${{ job.status }}: ${{ steps.environment.outputs.target_color }}\"}" \
-          #   ${{ secrets.SLACK_WEBHOOK_URL }}
