@@ -1,0 +1,52 @@
+config:
+  target: "http://s3.min71.dev.s3-website.ap-northeast-2.amazonaws.com"
+  phases:
+    # 워밍업: 300 요청
+    - duration: 60
+      arrivalRate: 5
+      name: "워밍업"
+
+    # 점진적 증가: 2,250 요청
+    - duration: 90
+      arrivalRate: 15
+      rampTo: 35
+      name: "점진적 증가"
+
+    # 최대 부하: 10,800 요청
+    - duration: 120
+      arrivalRate: 90
+      name: "최대 부하"
+
+    # 스파이크 테스트: 1,500 요청
+    - duration: 15
+      arrivalRate: 100
+      name: "스파이크 테스트"
+
+    # 쿨다운: 150 요청
+    - duration: 30
+      arrivalRate: 5
+      name: "쿨다운"
+
+  # 총 예상 요청 수: ~15,000 요청
+
+  plugins:
+    metrics-by-endpoint:
+      useOnlyRequestNames: true
+
+scenarios:
+  - name: "S3 Korea Static Website Test"
+    weight: 100
+    flow:
+      - get:
+          url: "/"
+          name: "homepage-s3-korea"
+          headers:
+            User-Agent: "Artillery-LoadTest/1.0"
+          capture:
+            - header: "content-type"
+              as: "content_type"
+            - header: "last-modified"
+              as: "last_modified"
+            - header: "etag"
+              as: "etag"
+      - think: 1

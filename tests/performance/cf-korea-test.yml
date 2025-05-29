@@ -1,0 +1,48 @@
+config:
+  target: "https://prod.min71.dev"
+  phases:
+    # 워밍업: 300 요청
+    - duration: 60
+      arrivalRate: 5
+      name: "워밍업"
+
+    # 점진적 증가: 2,250 요청
+    - duration: 90
+      arrivalRate: 15
+      rampTo: 35
+      name: "점진적 증가"
+
+    # 최대 부하: 10,800 요청
+    - duration: 120
+      arrivalRate: 90
+      name: "최대 부하"
+
+    # 스파이크: 1,500 요청
+    - duration: 15
+      arrivalRate: 100
+      name: "스파이크 테스트"
+
+    # 쿨다운: 150 요청
+    - duration: 30
+      arrivalRate: 5
+      name: "쿨다운"
+
+  # 총 예상 요청 수: ~15,000 요청
+
+  plugins:
+    metrics-by-endpoint:
+      useOnlyRequestNames: true
+
+scenarios:
+  - name: "Homepage Load Test"
+    weight: 100
+    flow:
+      - get:
+          url: "/"
+          name: "homepage"
+          capture:
+            - header: "x-cache"
+              as: "cache_status"
+            - header: "x-amz-cf-pop"
+              as: "cloudfront_pop"
+      - think: 1
