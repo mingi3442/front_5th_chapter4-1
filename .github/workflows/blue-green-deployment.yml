@@ -128,19 +128,31 @@ jobs:
           # 롤백을 위해 현재 설정 저장
           echo "etag=$ETAG" >> $GITHUB_OUTPUT
 
+          # 현재 Origin ID 확인
+          CURRENT_ORIGIN_ID=$(jq -r '.Distribution.DistributionConfig.Origins.Items[0].Id' dist.json)
+          echo "Current Origin ID: $CURRENT_ORIGIN_ID"
+
           # Origin 변경 (S3 웹사이트 엔드포인트 사용)
           NEW_DOMAIN="${{ steps.target.outputs.target_bucket }}.s3-website-${{ secrets.AWS_REGION }}.amazonaws.com"
+          NEW_ORIGIN_ID="${{ steps.target.outputs.target_bucket }}"
           echo "New domain will be: $NEW_DOMAIN"
+          echo "New Origin ID will be: $NEW_ORIGIN_ID"
 
-          # 더 정확한 jq 업데이트 (DomainName과 Id 모두 변경)
-          jq --arg domain "$NEW_DOMAIN" --arg id "${{ steps.target.outputs.target_bucket }}" \
+          # Origin 정보와 Cache Behavior 모두 업데이트
+          jq --arg domain "$NEW_DOMAIN" --arg new_id "$NEW_ORIGIN_ID" --arg old_id "$CURRENT_ORIGIN_ID" \
             '.Distribution.DistributionConfig.Origins.Items[0].DomainName = $domain | 
-             .Distribution.DistributionConfig.Origins.Items[0].Id = $id' \
+             .Distribution.DistributionConfig.Origins.Items[0].Id = $new_id |
+             .Distribution.DistributionConfig.DefaultCacheBehavior.TargetOriginId = $new_id |
+             (.Distribution.DistributionConfig.CacheBehaviors.Items[]? | select(.TargetOriginId == $old_id) | .TargetOriginId) = $new_id' \
             dist.json | jq '.Distribution.DistributionConfig' > new-config.json
 
           # 설정 확인 출력
           echo "=== New Origin Configuration ==="
-          jq '.Origins.Items[0]' new-config.json
+          jq '.Origins.Items[0] | {Id, DomainName}' new-config.json
+
+          echo "=== Cache Behavior Target Origins ==="
+          jq '.DefaultCacheBehavior.TargetOriginId' new-config.json
+          jq '.CacheBehaviors.Items[]?.TargetOriginId // empty' new-config.json
 
           # 업데이트
           aws cloudfront update-distribution \
@@ -148,7 +160,7 @@ jobs:
             --distribution-config file://new-config.json \
             --if-match $ETAG
 
-          echo "✅ CloudFront origin switched to: $NEW_DOMAIN"
+          echo "✅ CloudFront origin and cache behaviors switched to: $NEW_DOMAIN"
 
       - name: Wait for CloudFront deployment
         run: |
