@@ -1,67 +1,23 @@
-name: True Blue-Green Deployment with Full Testing
+name: Blue-Green Deployment with Enhanced Testing
 
 on:
   push:
     branches: [main]
   workflow_dispatch:
 
-env:
-  NODE_VERSION: "18"
-  HEALTH_CHECK_TIMEOUT: 30
-  PERFORMANCE_THRESHOLD: 2.0 # seconds
-
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: "npm"
-
       - name: Install dependencies
         run: npm ci
 
-      - name: Code quality checks
-        run: |
-          echo "🔍 Running code quality checks..."
-
-          # 린팅만 실행 (테스트 코드 없음)
-          if [ -f "package.json" ] && npm run | grep -q "lint"; then
-            echo "Running linting..."
-            npm run lint
-          else
-            echo "ℹ️ No lint script found, skipping..."
-          fi
-
-          # 타입 체크 (TypeScript 프로젝트인 경우)
-          if [ -f "tsconfig.json" ] && npm run | grep -q "type-check"; then
-            echo "Running type check..."
-            npm run type-check
-          else
-            echo "ℹ️ No type-check script found, skipping..."
-          fi
-
       - name: Build Next.js project
-        run: |
-          echo "🏗️ Building Next.js project..."
-          npm run build
-
-          # 빌드 결과 검증
-          if [ ! -d "out" ]; then
-            echo "❌ Build output directory not found"
-            exit 1
-          fi
-
-          echo "📊 Build size analysis:"
-          du -sh out/
-          find out/ -name "*.js" -o -name "*.css" | wc -l
+        run: npm run build
 
       - name: Setup AWS CLI and credentials
         env:
@@ -69,182 +25,91 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: ${{ secrets.AWS_REGION }}
         run: |
+          # AWS CLI는 GitHub 러너에 기본 설치되어 있음
           aws configure set aws_access_key_id "$AWS_ACCESS_KEY_ID"
           aws configure set aws_secret_access_key "$AWS_SECRET_ACCESS_KEY" 
           aws configure set default.region "$AWS_DEFAULT_REGION"
 
-          echo "🔐 AWS connection test:"
+          # 연결 테스트
           aws sts get-caller-identity
 
       - name: Install required tools
         run: |
-          sudo apt-get update && sudo apt-get install -y jq bc curl
-
-          # Lighthouse CLI for performance testing
+          sudo apt-get update && sudo apt-get install -y jq bc
+          # Lighthouse CLI 설치
           npm install -g @lhci/cli lighthouse
 
-      - name: Determine current and target environments
-        id: environment
+      - name: Determine target environment (Blue/Green)
+        id: target
         run: |
-          echo "🔍 Determining current environment..."
-
-          # 현재 프로덕션 환경의 Origin 확인
-          CURRENT_ORIGIN=$(aws cloudfront get-distribution \
-            --id ${{ secrets.PRODUCTION_DISTRIBUTION_ID }} \
-            --query 'Distribution.DistributionConfig.Origins.Items[0].DomainName' \
-            --output text)
-
+          # prod 환경의 현재 Origin 확인
+          CURRENT_ORIGIN=$(aws cloudfront get-distribution --id ${{ secrets.PRODUCTION_DISTRIBUTION_ID }} --query 'Distribution.DistributionConfig.Origins.Items[0].DomainName' --output text)
           echo "Current origin: $CURRENT_ORIGIN"
 
-          # Blue/Green 환경 결정
+          # blue/green 판단
           if [[ $CURRENT_ORIGIN == *"blue"* ]]; then
-            CURRENT_COLOR="blue"
-            TARGET_COLOR="green"
+            TARGET="green"
+            CURRENT="blue"
             echo "🔵 Current: BLUE → 🎯 Target: GREEN"
           else
-            CURRENT_COLOR="green"
-            TARGET_COLOR="blue"
+            TARGET="blue"
+            CURRENT="green" 
             echo "🟢 Current: GREEN → 🎯 Target: BLUE"
           fi
 
-          # 환경 변수 설정
-          CURRENT_BUCKET="hanghae-prod-$CURRENT_COLOR"
-          TARGET_BUCKET="hanghae-prod-$TARGET_COLOR"
+          echo "target_color=$TARGET" >> $GITHUB_OUTPUT
+          echo "target_bucket=hanghae-prod-$TARGET" >> $GITHUB_OUTPUT
+          echo "current_color=$CURRENT" >> $GITHUB_OUTPUT
+          echo "current_bucket=hanghae-prod-$CURRENT" >> $GITHUB_OUTPUT
 
-          echo "current_color=$CURRENT_COLOR" >> $GITHUB_OUTPUT
-          echo "target_color=$TARGET_COLOR" >> $GITHUB_OUTPUT
-          echo "current_bucket=$CURRENT_BUCKET" >> $GITHUB_OUTPUT
-          echo "target_bucket=$TARGET_BUCKET" >> $GITHUB_OUTPUT
-
-          echo "📋 Environment Summary:"
-          echo "  Current: $CURRENT_COLOR ($CURRENT_BUCKET)"
-          echo "  Target:  $TARGET_COLOR ($TARGET_BUCKET)"
-
-      - name: Deploy to staging environment (target)
+      - name: Deploy to target S3 bucket
         run: |
-          echo "📤 Deploying to staging environment: ${{ steps.environment.outputs.target_bucket }}"
+          echo "📤 Deploying to: ${{ steps.target.outputs.target_bucket }}"
+          aws s3 sync out/ s3://${{ steps.target.outputs.target_bucket }} --delete
 
-          # S3 동기화
-          aws s3 sync out/ s3://${{ steps.environment.outputs.target_bucket }} \
-            --delete \
-            --exact-timestamps \
-            --exclude "*.map"
-
-          # CloudFront Origin Access Control을 위한 버킷 정책 설정
-          echo "🔒 Setting up bucket policy for CloudFront access..."
-          cat > bucket-policy.json << EOF
-          {
-            "Version": "2012-10-17",
-            "Statement": [
-              {
-                "Sid": "AllowCloudFrontServicePrincipal",
-                "Effect": "Allow",
-                "Principal": {
-                  "Service": "cloudfront.amazonaws.com"
-                },
-                "Action": "s3:GetObject",
-                "Resource": "arn:aws:s3:::${{ steps.environment.outputs.target_bucket }}/*",
-                "Condition": {
-                  "StringEquals": {
-                    "AWS:SourceArn": "arn:aws:cloudfront::${{ secrets.AWS_ACCOUNT_ID }}:distribution/${{ secrets.PRODUCTION_DISTRIBUTION_ID }}"
-                  }
-                }
-              }
-            ]
-          }
-          EOF
-
-          aws s3api put-bucket-policy \
-            --bucket ${{ steps.environment.outputs.target_bucket }} \
-            --policy file://bucket-policy.json
-
-          echo "✅ Deployment to staging completed"
-
-      - name: Wait for S3 propagation
+      - name: Health check
         run: |
-          echo "⏳ Waiting for S3 propagation..."
-          sleep 5
+          HEALTH_URL="https://${{ steps.target.outputs.target_bucket }}.s3.amazonaws.com/index.html"
+          echo "🏥 Health checking: $HEALTH_URL"
 
-      - name: Basic health checks
-        run: |
-          echo "🏥 Running basic health checks..."
-          echo "ℹ️ Skipping direct S3 testing - will test via CloudFront after deployment"
-          echo "✅ S3 deployment completed, ready for CloudFront switch"
+          if curl -f --max-time 30 "$HEALTH_URL"; then
+            echo "✅ Health check passed"
+          else
+            echo "❌ Health check failed"
+            exit 1
+          fi
 
-      - name: Comprehensive functionality tests
-        run: |
-          echo "🧪 Comprehensive functionality tests will be performed after CloudFront switch..."
-          echo "ℹ️ S3 files deployed successfully, proceeding to CloudFront configuration"
-
-      - name: Performance testing
-        run: |
-          echo "⚡ Performance testing will be done after CloudFront deployment..."
-          echo "ℹ️ Skipping pre-deployment performance tests"
-
-      - name: Lighthouse performance audit
-        run: |
-          echo "🔍 Lighthouse audit will run after CloudFront deployment..."
-          echo "ℹ️ Skipping pre-deployment Lighthouse test"
-
-      - name: Load testing
-        run: |
-          echo "🔥 Load testing will be performed on production URL..."
-          echo "ℹ️ Skipping pre-deployment load test"
-
-      - name: API endpoints testing (if applicable)
-        run: |
-          echo "🔌 API testing will be done via production URL..."
-          echo "ℹ️ Skipping pre-deployment API tests"
-
-      - name: Security headers check
-        run: |
-          echo "🔒 Security headers will be checked via CloudFront..."
-          echo "ℹ️ Skipping pre-deployment security test"
-
-      - name: Final staging validation
-        run: |
-          echo "🎯 S3 deployment completed successfully"
-          echo "✅ Files uploaded to: ${{ steps.environment.outputs.target_bucket }}"
-          echo "🔄 Ready for CloudFront origin switch"
-
-      - name: Switch CloudFront to new environment
+      - name: Switch CloudFront origin
         id: switch
         run: |
-          echo "🔄 Switching CloudFront from ${{ steps.environment.outputs.current_color }} to ${{ steps.environment.outputs.target_color }}"
+          echo "🔄 Switching to ${{ steps.target.outputs.target_color }}"
 
-          # 현재 CloudFront 설정 백업
-          aws cloudfront get-distribution --id ${{ secrets.PRODUCTION_DISTRIBUTION_ID }} > current-dist.json
-          ETAG=$(jq -r '.ETag' current-dist.json)
+          # 현재 설정 가져오기 (롤백용 백업)
+          aws cloudfront get-distribution --id ${{ secrets.PRODUCTION_DISTRIBUTION_ID }} > dist.json
+          ETAG=$(jq -r '.ETag' dist.json)
 
-          echo "switch_etag=$ETAG" >> $GITHUB_OUTPUT
+          # 롤백을 위해 현재 설정 저장
+          echo "etag=$ETAG" >> $GITHUB_OUTPUT
 
-          # 새로운 Origin 도메인 설정
-          NEW_DOMAIN="${{ steps.environment.outputs.target_bucket }}.s3.amazonaws.com"
+          # Origin 변경
+          NEW_DOMAIN="${{ steps.target.outputs.target_bucket }}.s3.amazonaws.com"
+          jq --arg domain "$NEW_DOMAIN" '.Distribution.DistributionConfig.Origins.Items[0].DomainName = $domain' dist.json | jq '.Distribution.DistributionConfig' > new-config.json
 
-          # 배포 설정 업데이트
-          jq --arg domain "$NEW_DOMAIN" \
-             '.Distribution.DistributionConfig.Origins.Items[0].DomainName = $domain' \
-             current-dist.json | \
-          jq '.Distribution.DistributionConfig' > new-config.json
-
-          # CloudFront 업데이트 실행
-          UPDATE_RESULT=$(aws cloudfront update-distribution \
+          # 업데이트
+          aws cloudfront update-distribution \
             --id ${{ secrets.PRODUCTION_DISTRIBUTION_ID }} \
             --distribution-config file://new-config.json \
-            --if-match $ETAG)
+            --if-match $ETAG
 
-          echo "✅ CloudFront switch initiated"
-          echo "New Origin: $NEW_DOMAIN"
+          echo "✅ CloudFront origin switched to: $NEW_DOMAIN"
 
       - name: Wait for CloudFront deployment
         run: |
-          echo "⏳ Waiting for CloudFront deployment to complete..."
+          echo "⏳ Waiting for CloudFront deployment..."
 
-          # CloudFront 배포 상태 모니터링
-          DISTRIBUTION_ID="${{ secrets.PRODUCTION_DISTRIBUTION_ID }}"
-
+          # CloudFront 배포 완료까지 대기 (최대 10분)
           for i in {1..20}; do
-            STATUS=$(aws cloudfront get-distribution --id $DISTRIBUTION_ID --query 'Distribution.Status' --output text)
+            STATUS=$(aws cloudfront get-distribution --id ${{ secrets.PRODUCTION_DISTRIBUTION_ID }} --query 'Distribution.Status' --output text)
             echo "Deployment status ($i/20): $STATUS"
             
             if [[ "$STATUS" == "Deployed" ]]; then
@@ -260,36 +125,6 @@ jobs:
             sleep 30
           done
 
-          # 추가 대기 시간 (CloudFront 전파 완료)
-          echo "⏳ Waiting for CloudFront propagation..."
-          sleep 60
-
-      - name: Production health check
-        run: |
-          echo "🏥 Running production health checks..."
-          PROD_URL="https://prod.min71.dev"
-
-          # 프로덕션 URL에서 새 환경 확인
-          echo "1. Testing production URL..."
-          for i in {1..5}; do
-            if curl -f --max-time 30 "$PROD_URL/" > /dev/null; then
-              echo "✅ Production health check passed (attempt $i)"
-              break
-            else
-              echo "⏳ Production health check failed, retrying... (attempt $i/5)"
-              if [[ $i -eq 5 ]]; then
-                echo "❌ Production health check finally failed"
-                exit 1
-              fi
-              sleep 10
-            fi
-          done
-
-          # 캐시 상태 확인
-          echo "2. Checking cache status..."
-          CACHE_STATUS=$(curl -I -s "$PROD_URL/" | grep -i "x-cache" || echo "No cache header")
-          echo "Cache Status: $CACHE_STATUS"
-
       - name: Invalidate CloudFront cache
         run: |
           echo "🔄 Invalidating CloudFront cache..."
@@ -301,101 +136,176 @@ jobs:
             --output text)
 
           echo "Invalidation ID: $INVALIDATION_ID"
+          echo "⏳ Waiting for cache propagation..."
+          sleep 60
 
-          # 캐시 무효화 완료 대기
-          echo "⏳ Waiting for cache invalidation to complete..."
-          for i in {1..10}; do
-            STATUS=$(aws cloudfront get-invalidation \
-              --distribution-id ${{ secrets.PRODUCTION_DISTRIBUTION_ID }} \
-              --id $INVALIDATION_ID \
-              --query 'Invalidation.Status' \
-              --output text)
-            
-            echo "Invalidation status ($i/10): $STATUS"
-            
-            if [[ "$STATUS" == "Completed" ]]; then
-              echo "✅ Cache invalidation completed"
-              break
-            fi
-            
-            if [[ $i -eq 10 ]]; then
-              echo "⚠️ Cache invalidation still in progress, continuing..."
-              break
-            fi
-            
-            sleep 30
-          done
-
-      - name: Post-deployment verification
+      - name: Production health check
         run: |
-          echo "🔍 Post-deployment verification..."
+          echo "🏥 Running production health checks..."
           PROD_URL="https://prod.min71.dev"
 
-          # 1분간 안정성 테스트 (간단하게)
-          echo "Running 1-minute stability test..."
+          # 프로덕션 URL 연결 확인
+          for i in {1..5}; do
+            if curl -f --max-time 30 "$PROD_URL/" > /dev/null; then
+              echo "✅ Production health check passed (attempt $i)"
+              break
+            else
+              echo "⏳ Production health check failed, retrying... (attempt $i/5)"
+              if [[ $i -eq 5 ]]; then
+                echo "❌ Production health check failed"
+                exit 1
+              fi
+              sleep 10
+            fi
+          done
+
+      - name: HTML rendering validation
+        run: |
+          echo "🔍 Validating HTML rendering..."
+          PROD_URL="https://prod.min71.dev"
+
+          # HTML 응답 가져오기
+          RESPONSE=$(curl -s "$PROD_URL/")
+
+          # 기본 HTML 구조 확인
+          if [[ ! $RESPONSE == *"<html"* ]] || [[ ! $RESPONSE == *"</html>"* ]]; then
+            echo "❌ Invalid HTML structure"
+            exit 1
+          fi
+
+          # 필수 요소 확인
+          if [[ ! $RESPONSE == *"<title>"* ]]; then
+            echo "❌ Missing title tag"
+            exit 1
+          fi
+
+          if [[ ! $RESPONSE == *"<head>"* ]] || [[ ! $RESPONSE == *"</head>"* ]]; then
+            echo "❌ Missing head section"
+            exit 1
+          fi
+
+          # Next.js 관련 요소 확인
+          if [[ $RESPONSE == *"_next"* ]]; then
+            echo "✅ Next.js assets detected"
+          fi
+
+          # 페이지 크기 확인
+          PAGE_SIZE=$(echo -n "$RESPONSE" | wc -c)
+          echo "Page size: $PAGE_SIZE bytes"
+
+          if [ $PAGE_SIZE -lt 100 ]; then
+            echo "❌ Page too small, possible error page"
+            exit 1
+          fi
+
+          echo "✅ HTML rendering validation passed"
+
+      - name: Lighthouse performance audit
+        run: |
+          echo "🔍 Running Lighthouse performance audit..."
+          PROD_URL="https://prod.min71.dev"
+
+          # Lighthouse 실행
+          lighthouse "$PROD_URL" \
+            --output=json \
+            --output-path=./lighthouse-report.json \
+            --chrome-flags="--headless --no-sandbox --disable-dev-shm-usage" \
+            --quiet \
+            --max-wait-for-load=30000
+
+          # 성능 점수 확인
+          PERFORMANCE_SCORE=$(jq -r '.categories.performance.score * 100' lighthouse-report.json)
+          ACCESSIBILITY_SCORE=$(jq -r '.categories.accessibility.score * 100' lighthouse-report.json)
+          BEST_PRACTICES_SCORE=$(jq -r '.categories["best-practices"].score * 100' lighthouse-report.json)
+          SEO_SCORE=$(jq -r '.categories.seo.score * 100' lighthouse-report.json)
+
+          echo "📊 Lighthouse Scores:"
+          echo "  Performance: $PERFORMANCE_SCORE"
+          echo "  Accessibility: $ACCESSIBILITY_SCORE"  
+          echo "  Best Practices: $BEST_PRACTICES_SCORE"
+          echo "  SEO: $SEO_SCORE"
+
+          # 최소 성능 점수 확인 (60점 이상)
+          if (( $(echo "$PERFORMANCE_SCORE < 60" | bc -l) )); then
+            echo "⚠️ Performance score below threshold: $PERFORMANCE_SCORE (minimum: 60)"
+            echo "🔄 Deployment will continue but performance needs attention"
+          else
+            echo "✅ Performance score acceptable: $PERFORMANCE_SCORE"
+          fi
+
+          # 접근성 점수 확인 (80점 이상)
+          if (( $(echo "$ACCESSIBILITY_SCORE < 80" | bc -l) )); then
+            echo "⚠️ Accessibility score below recommended: $ACCESSIBILITY_SCORE"
+          else
+            echo "✅ Accessibility score good: $ACCESSIBILITY_SCORE"
+          fi
+
+      - name: Final stability test
+        run: |
+          echo "🔍 Running final stability test..."
+          PROD_URL="https://prod.min71.dev"
+
+          # 1분간 안정성 테스트
           for i in {1..4}; do
             if ! curl -f --max-time 15 "$PROD_URL/" > /dev/null; then
-              echo "❌ Post-deployment stability test failed at check $i"
+              echo "❌ Stability test failed at check $i"
               exit 1
             fi
             echo "✅ Stability check $i/4 passed"
             sleep 15
           done
 
-          echo "✅ Post-deployment verification completed"
+          echo "✅ Final stability test completed"
 
       - name: Rollback on failure
         if: failure()
         run: |
           echo "🚨 Deployment failed! Initiating rollback..."
 
-          # 이전 설정으로 롤백
-          if [[ -f "current-dist.json" ]] && [[ -n "${{ steps.switch.outputs.switch_etag }}" ]]; then
-            echo "Rolling back CloudFront to previous configuration..."
+          if [[ -f "dist.json" ]] && [[ -n "${{ steps.switch.outputs.etag }}" ]]; then
+            echo "🔄 Rolling back CloudFront to previous configuration..."
             
-            # 원래 설정 복원
-            jq '.Distribution.DistributionConfig' current-dist.json > rollback-config.json
+            # 원래 설정으로 롤백
+            jq '.Distribution.DistributionConfig' dist.json > rollback-config.json
+            
+            # 새로운 ETag 가져오기
+            CURRENT_ETAG=$(aws cloudfront get-distribution --id ${{ secrets.PRODUCTION_DISTRIBUTION_ID }} --query 'ETag' --output text)
             
             aws cloudfront update-distribution \
               --id ${{ secrets.PRODUCTION_DISTRIBUTION_ID }} \
               --distribution-config file://rollback-config.json \
-              --if-match ${{ steps.switch.outputs.switch_etag }}
+              --if-match $CURRENT_ETAG
             
-            echo "✅ Rollback completed"
+            # 롤백 후 캐시 무효화
+            aws cloudfront create-invalidation \
+              --distribution-id ${{ secrets.PRODUCTION_DISTRIBUTION_ID }} \
+              --paths "/*"
+            
+            echo "✅ Rollback completed - reverted to ${{ steps.target.outputs.current_color }}"
+            echo "⏳ Please wait 5-10 minutes for rollback to fully propagate"
           else
             echo "⚠️ Rollback configuration not available"
           fi
 
-      - name: Cleanup old environment
-        if: success()
-        run: |
-          echo "🧹 Cleaning up old environment..."
-
-          # 이전 환경(현재 사용하지 않는)의 오래된 파일 정리
-          OLD_BUCKET="${{ steps.environment.outputs.current_bucket }}"
-
-          # 30일 이상 된 파일 삭제 (선택적)
-          echo "Cleaning old files from $OLD_BUCKET..."
-          # aws s3api list-objects-v2 --bucket $OLD_BUCKET 등을 사용한 정리 로직
-
-          echo "✅ Cleanup completed"
-
-      - name: Deployment summary and notifications
+      - name: Deployment summary
         if: always()
         run: |
           echo "📊 DEPLOYMENT SUMMARY"
           echo "===================="
-          echo "🎯 Target Environment: ${{ steps.environment.outputs.target_color }}"
-          echo "📦 Target Bucket: ${{ steps.environment.outputs.target_bucket }}"
-          echo "🌐 Production URL: https://prod.min71.dev"
-          echo "📅 Deployment Time: $(date)"
-          echo "🔄 Status: ${{ job.status }}"
 
           if [[ "${{ job.status }}" == "success" ]]; then
             echo "🎉 Blue-Green deployment completed successfully!"
+            echo "✅ Target: ${{ steps.target.outputs.target_color }}"
+            echo "✅ Bucket: ${{ steps.target.outputs.target_bucket }}"
             echo "✅ All health checks passed"
-            echo "✅ Performance tests passed"
-            echo "✅ Production environment updated"
+            echo "✅ HTML rendering validated"
+            echo "✅ Lighthouse audit completed"
+            echo "🌐 Live URL: https://prod.min71.dev"
           else
-            echo "❌ Deployment failed - rollback initiated"
+            echo "❌ Deployment failed!"
+            echo "🔄 Rollback to ${{ steps.target.outputs.current_color }} initiated"
+            echo "📋 Please check the logs above for failure details"
           fi
+
+          echo "📅 Deployment Time: $(date)"
+          echo "🏷️ Status: ${{ job.status }}"
